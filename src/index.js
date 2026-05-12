@@ -25,15 +25,27 @@ const pendingApprovals = new Map();
 
 // ── Session Helpers ──
 
-function getSessionKey(route) {
-  return route.type === "group" ? `group:${route.groupId}` : `user:${route.userId}`;
+function getSessionKey(route, sessionSuffix = 0) {
+  const base = route.type === "group" ? `group:${route.groupId}` : `user:${route.userId}`;
+  return sessionSuffix > 0 ? `${base}:v${sessionSuffix}` : base;
 }
 
 function getSession(sessionKey) {
   if (!sessions.has(sessionKey)) {
-    sessions.set(sessionKey, { history: [] });
+    sessions.set(sessionKey, { history: [], sessionVersion: 0 });
   }
   return sessions.get(sessionKey);
+}
+
+function clearSession(route) {
+  const baseKey = getSessionKey(route, 0);
+  const sess = sessions.get(baseKey);
+  if (sess) {
+    // Increment version so next getSessionKey returns a new sessionId for Hermes
+    sess.sessionVersion = (sess.sessionVersion || 0) + 1;
+    sess.history = [];
+  }
+  return sess?.sessionVersion || 0;
 }
 
 function appendHistory(sessionKey, role, content) {
@@ -266,6 +278,13 @@ async function handleMessage(event) {
     return;
   }
 
+  // Check for clear context command
+  if (text === "清除上下文" || text === "新对话" || text.toLowerCase() === "new" || text.toLowerCase() === "reset") {
+    const newVersion = clearSession(route);
+    await sendReplyWithMention(route, `✅ 上下文已清除，开始新对话 (v${newVersion})`, event.message_id);
+    return;
+  }
+
   // Build user prompt with context label
   const contextLabel =
     route.type === "group"
@@ -275,6 +294,8 @@ async function handleMessage(event) {
 
   const sessionKey = getSessionKey(route);
   const session = getSession(sessionKey);
+  const sessionVersion = session.sessionVersion || 0;
+  const versionedSessionKey = getSessionKey(route, sessionVersion);
   appendHistory(sessionKey, "user", text);
 
   const systemPrompt = config.systemPrompt || undefined;
@@ -283,7 +304,7 @@ async function handleMessage(event) {
     // Submit async run
     const { runId } = await hermes.submitRun({
       userMessage: userPrompt,
-      sessionId: sessionKey,
+      sessionId: versionedSessionKey,
       systemPrompt,
       conversationHistory: session.history.slice(0, -1), // exclude just-added message
     });
