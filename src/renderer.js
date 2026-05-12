@@ -308,15 +308,39 @@ export function renderApprovalHtml({ command, riskLevel, toolName, runId, previe
 }
 
 /**
- * Convert PNG buffer to base64 data URL for OneBot.
- * NapCat runs in Docker so file:// paths don't work — base64 is universal.
+ * Save image to shared directory and return Docker path for OneBot.
+ * Host: /home/qsrhf/napcat/config/hermes-images/
+ * Docker: /app/napcat/config/hermes-images/
  */
-export function imageBufferToBase64(pngBuffer) {
-  return `base64://${pngBuffer.toString("base64")}`;
+import { writeFileSync, mkdirSync, readdirSync, unlinkSync } from "fs";
+import { join } from "path";
+import { randomBytes } from "crypto";
+
+const HOST_IMAGE_DIR = "/home/qsrhf/napcat/config/hermes-images";
+const DOCKER_IMAGE_DIR = "/app/napcat/config/hermes-images";
+const MAX_IMAGES = 50; // auto-cleanup old images
+
+export function saveImageForOnebot(pngBuffer) {
+  mkdirSync(HOST_IMAGE_DIR, { recursive: true });
+  // Cleanup old files if too many
+  try {
+    const files = readdirSync(HOST_IMAGE_DIR).filter((f) => f.endsWith(".png"));
+    if (files.length >= MAX_IMAGES) {
+      files.sort();
+      for (const f of files.slice(0, files.length - MAX_IMAGES + 1)) {
+        unlinkSync(join(HOST_IMAGE_DIR, f)).catch?.(() => {});
+      }
+    }
+  } catch {}
+  const name = `progress_${Date.now()}_${randomBytes(4).toString("hex")}.png`;
+  const hostPath = join(HOST_IMAGE_DIR, name);
+  const dockerPath = join(DOCKER_IMAGE_DIR, name);
+  writeFileSync(hostPath, pngBuffer);
+  return dockerPath;
 }
 
 /**
- * Try to render progress as image. Returns base64 data URL or null.
+ * Try to render progress as image. Returns file path or null.
  */
 export async function renderProgressImage(progressData) {
   if (!config.progressAsImage) return null;
@@ -324,7 +348,7 @@ export async function renderProgressImage(progressData) {
     const html = renderProgressHtml(progressData);
     const buf = await htmlToImage(html);
     if (!buf) return null;
-    return imageBufferToBase64(buf);
+    return saveImageForOnebot(buf);
   } catch (err) {
     log(`image render failed: ${err.message}`);
     return null;
@@ -332,14 +356,14 @@ export async function renderProgressImage(progressData) {
 }
 
 /**
- * Render approval as image. Returns base64 data URL or null.
+ * Render approval as image. Returns file path or null.
  */
 export async function renderApprovalImage(approvalData) {
   try {
     const html = renderApprovalHtml(approvalData);
     const buf = await htmlToImage(html);
     if (!buf) return null;
-    return imageBufferToBase64(buf);
+    return saveImageForOnebot(buf);
   } catch (err) {
     log(`approval image render failed: ${err.message}`);
     return null;
