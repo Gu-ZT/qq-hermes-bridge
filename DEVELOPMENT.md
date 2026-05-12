@@ -27,7 +27,7 @@ qq-hermes-bridge/
 
 ```js
 import { config } from "./config.js";
-console.log(config.botQq); // "1466674583"
+console.log(config.botQq); // "123456789"
 ```
 
 ### onebot.js

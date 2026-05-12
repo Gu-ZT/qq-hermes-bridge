@@ -78,7 +78,7 @@ journalctl --user -u qq-hermes-bridge -f
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `BOT_QQ` | `1466674583` | Bot QQ 号 |
+| `BOT_QQ` | (空) | Bot QQ 号 |
 | `BOT_NAME` | `小喵` | Bot 名称 |
 
 ### 访问控制
