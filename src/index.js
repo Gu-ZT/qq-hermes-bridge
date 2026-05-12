@@ -446,17 +446,88 @@ async function handleRunComplete(runId) {
   // Remove MEDIA: tags from text
   const remainingText = output.replace(/MEDIA:(?:\/|https?:\/\/)[^\s\n]+/g, "").trim();
 
-  // Send images first
-  for (const mediaPath of mediaItems) {
-    const success = await sendImage(run.route, mediaPath);
-    if (!success) {
-      log(`failed to send media: ${mediaPath}`);
+  if (mediaItems.length > 0) {
+    // Build combined message with images + text
+    const messageSegments = [];
+
+    for (const mediaPath of mediaItems) {
+      try {
+        const imageData = await getImageData(mediaPath);
+        if (imageData) {
+          messageSegments.push({ type: "image", data: { file: imageData } });
+        }
+      } catch (err) {
+        log(`failed to get image data: ${mediaPath}: ${err.message}`);
+      }
+    }
+
+    // Add text segment
+    if (remainingText) {
+      messageSegments.push({ type: "text", data: { text: remainingText } });
+    }
+
+    // Send combined message
+    if (messageSegments.length > 0) {
+      await sendCombinedMessage(run.route, messageSegments, run.userMsgId);
+    }
+  } else {
+    // No images, just send text
+    if (remainingText) {
+      await sendReplyWithMention(run.route, remainingText, run.userMsgId);
+    }
+  }
+}
+
+/**
+ * Get image data (base64) from path or URL.
+ */
+async function getImageData(source) {
+  if (source.startsWith("http://") || source.startsWith("https://")) {
+    log(`downloading image: ${source}`);
+    const resp = await fetch(source);
+    if (!resp.ok) throw new Error(`download failed: ${resp.status}`);
+    const buffer = Buffer.from(await resp.arrayBuffer());
+    return `base64://${buffer.toString("base64")}`;
+  } else if (source.startsWith("base64://")) {
+    return source;
+  } else {
+    log(`reading local image: ${source}`);
+    if (!existsSync(source)) {
+      throw new Error(`file not found: ${source}`);
+    }
+    const buffer = readFileSync(source);
+    return `base64://${buffer.toString("base64")}`;
+  }
+}
+
+/**
+ * Send combined message with images and text in one message.
+ */
+async function sendCombinedMessage(route, segments, replyMsgId) {
+  // Split long text into chunks if needed
+  const finalSegments = [];
+  for (const seg of segments) {
+    if (seg.type === "text") {
+      // For combined messages, we keep text as one segment
+      // (splitting would break the image+text pairing)
+      finalSegments.push(seg);
+    } else {
+      finalSegments.push(seg);
     }
   }
 
-  // Send remaining text
-  if (remainingText) {
-    await sendReplyWithMention(run.route, remainingText, run.userMsgId);
+  if (route.type === "group") {
+    if (replyMsgId) {
+      // Add reply segment at the beginning
+      await onebot.sendGroupMsg(route.groupId, [
+        { type: "reply", data: { id: String(replyMsgId) } },
+        ...finalSegments,
+      ]);
+    } else {
+      await onebot.sendGroupMsg(route.groupId, finalSegments);
+    }
+  } else {
+    await onebot.sendPrivateMsg(route.userId, finalSegments);
   }
 }
 
