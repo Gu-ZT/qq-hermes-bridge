@@ -225,49 +225,6 @@ function splitText(text) {
   return chunks;
 }
 
-// ── Progress Tracking ──
-
-function formatElapsed(ms) {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(0)}s`;
-  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
-}
-
-async function sendProgressCard(runId) {
-  const run = activeRuns.get(runId);
-  if (!run || run.sendingProgress) return;
-  run.sendingProgress = true;
-
-  try {
-    const elapsed = formatElapsed(Date.now() - run.startedAt);
-    const lines = [`⏳ Hermes 执行中 (${elapsed})`];
-
-    for (const t of run.tools.slice(-8)) {
-      const icon = t.error ? "❌" : "✅";
-      const dur = t.duration ? ` (${formatElapsed(t.duration)})` : "";
-      const preview = t.preview ? ` → ${t.preview.slice(0, 60)}` : "";
-      lines.push(`${icon} ${t.name}${dur}${preview}`);
-    }
-
-    if (run.currentTool) {
-      const preview = run.currentTool.preview ? ` → ${run.currentTool.preview.slice(0, 60)}` : "";
-      lines.push(`⏳ ${run.currentTool.name}...${preview}`);
-    }
-
-    // Add response preview if available
-    if (run.messageDelta) {
-      const preview = run.messageDelta.slice(-200);
-      lines.push("");
-      lines.push("📝 回复预览:");
-      lines.push(preview);
-    }
-
-    await sendMessage(run.route, lines.join("\n"));
-  } finally {
-    run.sendingProgress = false;
-  }
-}
-
 // ── Main Message Handler ──
 
 async function handleMessage(event) {
@@ -331,7 +288,6 @@ async function handleMessage(event) {
       tools: [],
       currentTool: null,
       startedAt: Date.now(),
-      sendingProgress: false,
       messageDelta: "",
       finalOutput: "",
       userMsgId: event.message_id,
@@ -361,19 +317,8 @@ async function handleMessage(event) {
 
       "message.delta"(ev) {
         runState.messageDelta += ev.delta || "";
-        runState.deltaCount = (runState.deltaCount || 0) + 1;
-        
-        // Send progress card every 10 delta events, or when tools change
-        const shouldSend = !runState.sendingProgress && 
-                          runState.tools.length > 0 && 
-                          runState.deltaCount % 10 === 0;
-        
-        if (shouldSend) {
-          log(`sending progress card (delta #${runState.deltaCount})`);
-          sendProgressCard(runId).catch((err) =>
-            log(`progress send error: ${err.message}`)
-          );
-        }
+        // Just accumulate, don't send progress cards
+        // Final result will be sent on run.completed
       },
 
       "approval.request"(ev) {
