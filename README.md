@@ -136,6 +136,14 @@ journalctl --user -u qq-hermes-bridge -f
 
 发送 `停止` 或 `stop` 可中断当前运行的任务。
 
+### 清除上下文
+
+发送以下任意一个命令可清除对话上下文，开始新对话：
+- `清除上下文`
+- `新对话`
+- `new`
+- `reset`
+
 ### 命令审批
 
 当 agent 执行高危命令时，会弹出审批卡片：
@@ -192,6 +200,13 @@ journalctl --user -u qq-hermes-bridge -f
 详见 [DEVELOPMENT.md](./DEVELOPMENT.md)
 
 ## 📝 Changelog
+
+### v1.1.0 (2025-05-13)
+
+- **图片发送重构** — 改用 base64 编码发送图片，解决 NapCat Docker 环境下文件路径访问问题
+- **支持远程图片** — `MEDIA:https://...` 格式的 URL 会自动下载并发送
+- **清除上下文** — 支持 `清除上下文`/`新对话`/`new`/`reset` 命令
+- **代码优化** — 统一图片发送逻辑，简化文件处理流程
 
 ### v1.0.0 (2025-05-13)
 

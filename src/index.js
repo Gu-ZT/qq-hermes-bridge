@@ -6,47 +6,46 @@ import {
   renderApprovalImage,
   closeRenderer,
 } from "./renderer.js";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, copyFileSync } from "fs";
-import { join, basename } from "path";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { join } from "path";
 import { randomBytes } from "crypto";
 
 const log = (msg, ...args) => console.log(`[bridge] ${msg}`, ...args);
 
-// ── Image Sharing (Host <-> Docker) ──
+// ── Image Helpers ──
 
-const HOST_IMAGE_DIR = "/home/qsrhf/napcat/config/hermes-images";
-const DOCKER_IMAGE_DIR = "/app/napcat/config/hermes-images";
+const SHARED_IMAGE_DIR = "/home/qsrhf/napcat/config/hermes-images";
 
 /**
- * Copy an image from any host path to the shared directory accessible by NapCat Docker.
- * Returns the Docker path for OneBot API.
+ * Read image file and return base64 data URI for OneBot.
  */
-function copyImageToSharedDir(hostImagePath) {
-  mkdirSync(HOST_IMAGE_DIR, { recursive: true });
-  const ext = hostImagePath.split(".").pop()?.split("?")[0] || "png";
-  const name = `img_${Date.now()}_${randomBytes(4).toString("hex")}.${ext}`;
-  const hostPath = join(HOST_IMAGE_DIR, name);
-  const dockerPath = join(DOCKER_IMAGE_DIR, name);
-  copyFileSync(hostImagePath, hostPath);
-  return dockerPath;
+function imageToBase64(filePath) {
+  const buffer = readFileSync(filePath);
+  const ext = filePath.split(".").pop()?.toLowerCase() || "png";
+  const mime = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" }[ext] || "image/png";
+  return `base64://${buffer.toString("base64")}`;
 }
 
 /**
- * Download an image from URL to shared directory.
- * Returns the Docker path for OneBot API.
+ * Download image from URL and return base64 data URI.
  */
-async function downloadImageToSharedDir(imageUrl) {
-  mkdirSync(HOST_IMAGE_DIR, { recursive: true });
-  const ext = imageUrl.split(".").pop()?.split("?")[0] || "jpg";
-  const name = `img_${Date.now()}_${randomBytes(4).toString("hex")}.${ext}`;
-  const hostPath = join(HOST_IMAGE_DIR, name);
-  const dockerPath = join(DOCKER_IMAGE_DIR, name);
-  
+async function downloadImageAsBase64(imageUrl) {
   const resp = await fetch(imageUrl);
   if (!resp.ok) throw new Error(`download failed: ${resp.status}`);
   const buffer = Buffer.from(await resp.arrayBuffer());
+  const contentType = resp.headers.get("content-type") || "image/jpeg";
+  return `base64://${buffer.toString("base64")}`;
+}
+
+/**
+ * Save image to shared directory for NapCat Docker access.
+ * Returns host path.
+ */
+function saveToSharedDir(filename, buffer) {
+  mkdirSync(SHARED_IMAGE_DIR, { recursive: true });
+  const hostPath = join(SHARED_IMAGE_DIR, filename);
   writeFileSync(hostPath, buffer);
-  return dockerPath;
+  return hostPath;
 }
 
 // ── State ──
@@ -54,13 +53,8 @@ async function downloadImageToSharedDir(imageUrl) {
 const onebot = new OneBotClient();
 const hermes = new HermesClient();
 
-// Per-chat session state: sessionId -> {history: [{role, content}], lastRunId}
 const sessions = new Map();
-
-// Active runs: runId -> {route, stream, tools, currentTool, startedAt, messageDelta, lastProgressSent, sendingProgress}
 const activeRuns = new Map();
-
-// Pending approvals: runId -> {route, data, timeoutTimer}
 const pendingApprovals = new Map();
 
 // ── Session Helpers ──
@@ -81,7 +75,6 @@ function clearSession(route) {
   const baseKey = getSessionKey(route, 0);
   const sess = sessions.get(baseKey);
   if (sess) {
-    // Increment version so next getSessionKey returns a new sessionId for Hermes
     sess.sessionVersion = (sess.sessionVersion || 0) + 1;
     sess.history = [];
   }
@@ -91,8 +84,7 @@ function clearSession(route) {
 function appendHistory(sessionKey, role, content) {
   const sess = getSession(sessionKey);
   sess.history.push({ role, content });
-  // Trim to max
-  const max = config.localHistoryMaxMessages * 2; // user+assistant pairs
+  const max = config.localHistoryMaxMessages * 2;
   if (sess.history.length > max) {
     sess.history = sess.history.slice(-max);
   }
@@ -121,15 +113,8 @@ function canChat(route) {
 function hasAtSelf(message) {
   if (!Array.isArray(message)) return false;
   return message.some(
-    (seg) =>
-      seg.type === "at" &&
-      String(seg.data?.qq) === String(config.botQq)
+    (seg) => seg.type === "at" && String(seg.data?.qq) === String(config.botQq)
   );
-}
-
-function hasReplyToBot(message) {
-  // We check this async later; for now just check if there's a reply segment
-  return Array.isArray(message) && message.some((seg) => seg.type === "reply");
 }
 
 function extractText(message) {
@@ -152,15 +137,12 @@ function containsKeyword(text) {
 
 function shouldTrigger(event) {
   if (event.message_type !== "group") return { triggered: true, reason: "private" };
-
   const text = extractText(event.message);
   const mentioned = hasAtSelf(event.message);
   const keywordHit = containsKeyword(text);
-
   if (mentioned) return { triggered: true, reason: "mention" };
   if (keywordHit) return { triggered: true, reason: `keyword:${keywordHit}` };
   if (!config.requireMention) return { triggered: true, reason: "bare" };
-
   return { triggered: false };
 }
 
@@ -177,15 +159,43 @@ async function sendReply(route, text) {
   }
 }
 
-async function sendReplyImage(route, imagePath) {
+/**
+ * Send image via base64 (most reliable method).
+ * @param {object} route - {type, groupId?, userId?}
+ * @param {string} source - file path or URL
+ */
+async function sendImage(route, source) {
   try {
-    if (route.type === "group") {
-      await onebot.sendGroupImage(route.groupId, `file://${imagePath}`);
+    let imageData;
+    
+    if (source.startsWith("http://") || source.startsWith("https://")) {
+      // Download remote image
+      log(`downloading image: ${source}`);
+      imageData = await downloadImageAsBase64(source);
+    } else if (source.startsWith("base64://")) {
+      // Already base64
+      imageData = source;
     } else {
-      await onebot.sendPrivateImage(route.userId, `file://${imagePath}`);
+      // Read local file
+      log(`reading local image: ${source}`);
+      if (!existsSync(source)) {
+        throw new Error(`file not found: ${source}`);
+      }
+      imageData = imageToBase64(source);
     }
+    
+    // Send via OneBot
+    if (route.type === "group") {
+      await onebot.sendGroupImage(route.groupId, imageData);
+    } else {
+      await onebot.sendPrivateImage(route.userId, imageData);
+    }
+    
+    log(`image sent successfully`);
+    return true;
   } catch (err) {
-    log(`image send failed: ${err.message}, falling back to text`);
+    log(`image send failed: ${err.message}`);
+    return false;
   }
 }
 
@@ -209,7 +219,6 @@ function splitMessage(text) {
       chunks.push(remaining);
       break;
     }
-    // Try to split at newline or space
     let splitIdx = remaining.lastIndexOf("\n", config.maxMessageLength);
     if (splitIdx < config.maxMessageLength * 0.3) {
       splitIdx = remaining.lastIndexOf(" ", config.maxMessageLength);
@@ -232,7 +241,7 @@ function formatElapsed(ms) {
 }
 
 function shouldSendProgress(runState) {
-  if (runState.sendingProgress) return false; // already sending, skip
+  if (runState.sendingProgress) return false;
   const now = Date.now();
   const elapsed = (now - runState.lastProgressSent) / 1000;
   return elapsed >= config.progressRateLimitSec;
@@ -241,8 +250,6 @@ function shouldSendProgress(runState) {
 async function sendProgressCard(runId) {
   const run = activeRuns.get(runId);
   if (!run) return;
-
-  // Lock to prevent concurrent sends
   if (run.sendingProgress) return;
   run.sendingProgress = true;
 
@@ -256,12 +263,11 @@ async function sendProgressCard(runId) {
     elapsed,
   };
 
-  // Try image first
   try {
     if (config.progressAsImage) {
       const imagePath = await renderProgressImage(progressData);
       if (imagePath) {
-        await sendReplyImage(run.route, imagePath);
+        await sendImage(run.route, imagePath);
         run.lastProgressSent = now;
         return;
       }
@@ -294,10 +300,8 @@ async function handleMessage(event) {
       ? { type: "group", groupId: event.group_id, userId: event.user_id }
       : { type: "user", userId: event.user_id };
 
-  // Access control
   if (!canChat(route)) return;
 
-  // Trigger check
   const { triggered, reason } = shouldTrigger(event);
   if (!triggered) return;
 
@@ -325,7 +329,7 @@ async function handleMessage(event) {
     return;
   }
 
-  // Build user prompt with context label
+  // Build user prompt
   const contextLabel =
     route.type === "group"
       ? `当前来自 QQ 群 ${route.groupId}。发送者: ${event.sender?.nickname || route.userId} (${route.userId})。请按 QQ 聊天风格回复。`
@@ -341,17 +345,15 @@ async function handleMessage(event) {
   const systemPrompt = config.systemPrompt || undefined;
 
   try {
-    // Submit async run
     const { runId } = await hermes.submitRun({
       userMessage: userPrompt,
       sessionId: versionedSessionKey,
       systemPrompt,
-      conversationHistory: session.history.slice(0, -1), // exclude just-added message
+      conversationHistory: session.history.slice(0, -1),
     });
 
     log(`run submitted: ${runId}`);
 
-    // Track run state
     const runState = {
       route,
       tools: [],
@@ -365,7 +367,6 @@ async function handleMessage(event) {
     };
     activeRuns.set(runId, runState);
 
-    // Connect to SSE events
     const stream = hermes.streamEvents(runId, {
       "tool.started"(ev) {
         runState.currentTool = {
@@ -390,7 +391,6 @@ async function handleMessage(event) {
 
       "message.delta"(ev) {
         runState.messageDelta += ev.delta || "";
-        // Check if we should send a progress update
         if (shouldSendProgress(runState) && runState.tools.length > 0) {
           sendProgressCard(runId).catch((err) =>
             log(`progress send error: ${err.message}`)
@@ -411,10 +411,6 @@ async function handleMessage(event) {
       "run.failed"(ev) {
         runState.finalOutput = `❌ 执行失败: ${ev.error || "unknown error"}`;
         log(`run failed: ${runId}: ${ev.error}`);
-      },
-
-      "reasoning.available"(ev) {
-        // Optional: could display reasoning
       },
 
       _end() {
@@ -442,55 +438,41 @@ async function handleRunComplete(runId) {
   if (!run) return;
   activeRuns.delete(runId);
 
-  // Send final response
   let output = run.finalOutput || run.messageDelta;
-  if (output?.trim()) {
-    appendHistory(getSessionKey(run.route), "assistant", output);
+  if (!output?.trim()) return;
 
-    // Parse MEDIA: tags and send images separately
-    // Match both local paths (/path/to/file) and URLs (https://...)
-    const mediaRegex = /MEDIA:((?:\/|https?:\/\/)[^\s\n]+)/g;
-    let remainingText = output;
-    let match;
-    const mediaPaths = [];
+  appendHistory(getSessionKey(run.route), "assistant", output);
 
-    while ((match = mediaRegex.exec(output)) !== null) {
-      mediaPaths.push(match[1]);
+  // Parse MEDIA: tags
+  // Supports: MEDIA:/path/to/file.png, MEDIA:https://example.com/img.jpg
+  const mediaRegex = /MEDIA:((?:\/|https?:\/\/)[^\s\n]+)/g;
+  const mediaItems = [];
+  let match;
+
+  while ((match = mediaRegex.exec(output)) !== null) {
+    mediaItems.push(match[1]);
+  }
+
+  // Remove MEDIA: tags from text
+  const remainingText = output.replace(/MEDIA:(?:\/|https?:\/\/)[^\s\n]+/g, "").trim();
+
+  // Send images first
+  for (const mediaPath of mediaItems) {
+    const success = await sendImage(run.route, mediaPath);
+    if (!success) {
+      log(`failed to send media: ${mediaPath}`);
     }
+  }
 
-    // Remove MEDIA: tags from text
-    remainingText = output.replace(/MEDIA:(?:\/|https?:\/\/)[^\s\n]+/g, "").trim();
-
-    // Send images first (copy/download to shared dir for Docker access)
-    for (const imgPath of mediaPaths) {
-      try {
-        let dockerPath;
-        if (imgPath.startsWith("http://") || imgPath.startsWith("https://")) {
-          // Download remote image
-          dockerPath = await downloadImageToSharedDir(imgPath);
-          log(`downloaded image: ${imgPath} -> ${dockerPath}`);
-        } else {
-          // Copy local image
-          dockerPath = copyImageToSharedDir(imgPath);
-          log(`copied image: ${imgPath} -> ${dockerPath}`);
-        }
-        await sendReplyImage(run.route, dockerPath);
-      } catch (err) {
-        log(`failed to send image ${imgPath}: ${err.message}`);
-      }
-    }
-
-    // Send remaining text (if any)
-    if (remainingText) {
-      await sendReplyWithMention(run.route, remainingText, run.userMsgId);
-    }
+  // Send remaining text
+  if (remainingText) {
+    await sendReplyWithMention(run.route, remainingText, run.userMsgId);
   }
 }
 
 // ── Stop Command ──
 
 async function handleStopCommand(route) {
-  // Find active run for this chat
   for (const [runId, run] of activeRuns) {
     if (
       (route.type === "group" && run.route.groupId === route.groupId) ||
@@ -512,174 +494,126 @@ function handleApprovalRequest(runId, ev) {
   const run = activeRuns.get(runId);
   if (!run) return;
 
-  const route = run.route;
-  const command = ev.command || "unknown command";
-  const description = ev.description || "";
-  const patternKey = ev.pattern_key || "";
-
-  // Derive risk level from pattern key
-  const riskLevel = /rm|delete|sudo|chmod|chown|kill|reboot|shutdown/.test(patternKey)
-    ? "high"
-    : /curl|wget|pip|npm|apt|docker/.test(patternKey)
-    ? "medium"
-    : "low";
-
-  // Store pending approval
   const approval = {
-    runId,
-    route,
+    route: run.route,
     data: ev,
-    createdAt: Date.now(),
+    runId,
   };
   pendingApprovals.set(runId, approval);
 
-  // Auto-deny timeout
-  if (config.approvalTimeoutSec > 0) {
-    approval.timeoutTimer = setTimeout(async () => {
-      if (pendingApprovals.has(runId)) {
-        pendingApprovals.delete(runId);
-        try {
-          await hermes.resolveApproval(runId, "deny");
-          await sendReply(route, `⏱️ 审批超时，已自动拒绝: ${command.slice(0, 100)}`);
-        } catch {}
-      }
-    }, config.approvalTimeoutSec * 1000);
-  }
+  // Auto-deny after timeout
+  approval.timeoutTimer = setTimeout(async () => {
+    if (pendingApprovals.has(runId)) {
+      pendingApprovals.delete(runId);
+      await hermes.approveRun(runId, "deny");
+      await sendReply(run.route, "⏰ 审批超时，已自动拒绝");
+    }
+  }, config.approvalTimeoutSec * 1000);
 
-  // Send approval card
-  sendApprovalCard(runId, command, riskLevel).catch((err) =>
-    log(`approval card error: ${err.message}`)
+  // Send approval request
+  sendApprovalCard(run.route, ev, runId).catch((err) =>
+    log(`approval card send error: ${err.message}`)
   );
 }
 
-async function sendApprovalCard(runId, command, riskLevel) {
-  const approval = pendingApprovals.get(runId);
-  if (!approval) return;
+async function sendApprovalCard(route, approval, runId) {
+  try {
+    const imagePath = await renderApprovalImage({
+      command: approval.command || approval.description,
+      riskLevel: approval.risk_level || "medium",
+      toolName: approval.tool,
+      runId,
+      preview: approval.preview,
+    });
 
-  const route = approval.route;
-  const ev = approval.data;
-
-  // Try image first
-  const imagePath = await renderApprovalImage({
-    command,
-    riskLevel,
-    toolName: ev.pattern_key || "",
-    runId,
-    preview: ev.description || "",
-  });
-
-  if (imagePath) {
-    await sendReplyImage(route, imagePath);
-    // Also send a text message with the reply instructions for easy copy
-    await sendReply(
-      route,
-      `⚠️ 上方命令需要审批。回复 "批准" / "拒绝" / "始终允许" 来处理。`
-    );
-  } else {
-    // Text fallback
-    const lines = [
-      `⚠️ 需要审批`,
-      patternKey ? `模式: ${patternKey}` : "",
-      `命令: ${command.slice(0, 300)}`,
-      description ? `说明: ${description.slice(0, 200)}` : "",
-      riskLevel === "high" ? `风险: 🔴 高` : riskLevel === "medium" ? `风险: 🟡 中` : `风险: 🔵 低`,
-      "",
-      `回复 "批准" / "拒绝" / "始终允许" 来处理`,
-      `(run: ${runId.slice(-8)})`,
-    ].filter(Boolean);
-    await sendReply(route, lines.join("\n"));
+    if (imagePath) {
+      await sendImage(route, imagePath);
+    } else {
+      // Fallback to text
+      const lines = [
+        `⚠️ 需要审批`,
+        `命令: ${approval.command || approval.description}`,
+        ``,
+        `回复 "批准" 或 "通过" 允许一次`,
+        `回复 "拒绝" 或 "deny" 拒绝执行`,
+        `回复 "始终允许" 本次会话内始终允许`,
+      ];
+      await sendReply(route, lines.join("\n"));
+    }
+  } catch (err) {
+    log(`approval card error: ${err.message}`);
   }
 }
 
 async function handleApprovalReply(route, text, msgId) {
-  // Find pending approval for this chat
   for (const [runId, approval] of pendingApprovals) {
     const approvalRoute = approval.route;
     if (
-      (route.type === "group" && approvalRoute.groupId === route.groupId) ||
-      (route.type === "user" && approvalRoute.userId === route.userId)
+      (route.type === "group" && approvalRoute.type === "group" && route.groupId === approvalRoute.groupId) ||
+      (route.type === "user" && approvalRoute.type === "user" && route.userId === approvalRoute.userId)
     ) {
-      const lower = text.toLowerCase().trim();
-      let choice = null;
+      const lower = text.toLowerCase();
+      let action;
 
-      if (["批准", "通过", "approve", "ok", "允许"].some((k) => lower.includes(k))) {
-        choice = "once";
-      } else if (["拒绝", "deny", "不批准", "不允许"].some((k) => lower.includes(k))) {
-        choice = "deny";
-      } else if (["始终允许", "always", "始终批准", "全部允许"].some((k) => lower.includes(k))) {
-        choice = "always";
-      } else if (["本次允许", "session"].some((k) => lower.includes(k))) {
-        choice = "session";
+      if (lower === "批准" || lower === "通过" || lower === "approve" || lower === "allow") {
+        action = "once";
+      } else if (lower === "拒绝" || lower === "deny" || lower === "reject") {
+        action = "deny";
+      } else if (lower === "始终允许" || lower === "always" || lower === "session") {
+        action = "session";
+      } else {
+        return false;
       }
 
-      if (!choice) return false;
-
-      // Clear timeout
-      if (approval.timeoutTimer) clearTimeout(approval.timeoutTimer);
+      clearTimeout(approval.timeoutTimer);
       pendingApprovals.delete(runId);
+      await hermes.approveRun(runId, action);
 
-      try {
-        await hermes.resolveApproval(runId, choice);
-        const labels = {
-          once: "已批准（一次）✅",
-          deny: "已拒绝 ❌",
-          always: "已设置始终允许 ♾️",
-          session: "已允许本次会话 ✅",
-        };
-        await sendReplyWithMention(route, labels[choice] || `已处理: ${choice}`, msgId);
-        log(`approval resolved: ${runId} -> ${choice}`);
-      } catch (err) {
-        await sendReply(route, `审批处理失败: ${err.message}`);
-        log(`approval error: ${err.message}`);
-      }
+      const statusText = {
+        once: "已批准（一次）✅",
+        deny: "已拒绝 ❌",
+        session: "已允许本次会话 ✅",
+      }[action];
 
+      await sendReplyWithMention(route, statusText, msgId);
       return true;
     }
   }
   return false;
 }
 
-// ── Bootstrap ──
+// ── Lifecycle ──
 
-async function main() {
-  log("=== QQ-Hermes Bridge starting ===");
-  log(`Bot: ${config.botName} (${config.botQq})`);
-  log(`Hermes API: ${config.hermesApiUrl}`);
-  log(`NapCat WS: ${config.onebotWsUrl}`);
-  log(`Progress: image=${config.progressAsImage}, rate=${config.progressRateLimitSec}s`);
-  log(`Approval: enabled=${config.approvalEnabled}, timeout=${config.approvalTimeoutSec}s`);
-
-  // Connect to NapCat
-  onebot.on("_connected", () => {
-    log("NapCat connected, listening for messages");
-  });
-
-  onebot.on("message.group", (event) => {
-    handleMessage(event).catch((err) =>
-      log(`handleMessage error: ${err.message}`)
-    );
-  });
-
-  onebot.on("message.private", (event) => {
-    handleMessage(event).catch((err) =>
-      log(`handleMessage error: ${err.message}`)
-    );
-  });
-
+export async function start() {
+  log("starting bridge...");
   onebot.connect();
 
-  // Graceful shutdown
-  const shutdown = async () => {
-    log("shutting down...");
-    onebot.close();
-    await closeRenderer();
-    process.exit(0);
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  onebot.on("message.group", handleMessage);
+  onebot.on("message.private", handleMessage);
+
+  log("bridge started");
 }
 
-main().catch((err) => {
-  console.error("Fatal:", err);
+export async function stop() {
+  log("stopping bridge...");
+  onebot.close();
+  await closeRenderer();
+  log("bridge stopped");
+}
+
+// Handle shutdown
+process.on("SIGINT", async () => {
+  await stop();
+  process.exit(0);
+});
+
+process.on("SIGTERM", async () => {
+  await stop();
+  process.exit(0);
+});
+
+// Auto-start
+start().catch((err) => {
+  log(`failed to start: ${err.message}`);
   process.exit(1);
 });
