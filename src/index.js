@@ -389,10 +389,12 @@ async function handleMessage(event) {
         runState.currentTool = null;
         log(`tool.completed: ${ev.tool} (${ev.duration?.toFixed(1)}s)`);
         
-        // Send progress update after each tool completion
-        sendToolProgress(runId).catch((err) =>
-          log(`tool progress error: ${err.message}`)
-        );
+        // Send progress update every 15 tools
+        if (runState.tools.length % 15 === 0) {
+          sendToolProgress(runId).catch((err) =>
+            log(`tool progress error: ${err.message}`)
+          );
+        }
       },
 
       "message.delta"(ev) {
