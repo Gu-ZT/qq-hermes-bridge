@@ -23,11 +23,29 @@ const DOCKER_IMAGE_DIR = "/app/napcat/config/hermes-images";
  */
 function copyImageToSharedDir(hostImagePath) {
   mkdirSync(HOST_IMAGE_DIR, { recursive: true });
-  const ext = hostImagePath.split(".").pop() || "png";
+  const ext = hostImagePath.split(".").pop()?.split("?")[0] || "png";
   const name = `img_${Date.now()}_${randomBytes(4).toString("hex")}.${ext}`;
   const hostPath = join(HOST_IMAGE_DIR, name);
   const dockerPath = join(DOCKER_IMAGE_DIR, name);
   copyFileSync(hostImagePath, hostPath);
+  return dockerPath;
+}
+
+/**
+ * Download an image from URL to shared directory.
+ * Returns the Docker path for OneBot API.
+ */
+async function downloadImageToSharedDir(imageUrl) {
+  mkdirSync(HOST_IMAGE_DIR, { recursive: true });
+  const ext = imageUrl.split(".").pop()?.split("?")[0] || "jpg";
+  const name = `img_${Date.now()}_${randomBytes(4).toString("hex")}.${ext}`;
+  const hostPath = join(HOST_IMAGE_DIR, name);
+  const dockerPath = join(DOCKER_IMAGE_DIR, name);
+  
+  const resp = await fetch(imageUrl);
+  if (!resp.ok) throw new Error(`download failed: ${resp.status}`);
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  writeFileSync(hostPath, buffer);
   return dockerPath;
 }
 
@@ -430,7 +448,8 @@ async function handleRunComplete(runId) {
     appendHistory(getSessionKey(run.route), "assistant", output);
 
     // Parse MEDIA: tags and send images separately
-    const mediaRegex = /MEDIA:(\/[^\s\n]+)/g;
+    // Match both local paths (/path/to/file) and URLs (https://...)
+    const mediaRegex = /MEDIA:((?:\/|https?:\/\/)[^\s\n]+)/g;
     let remainingText = output;
     let match;
     const mediaPaths = [];
@@ -440,14 +459,21 @@ async function handleRunComplete(runId) {
     }
 
     // Remove MEDIA: tags from text
-    remainingText = output.replace(/MEDIA:\/[^\s\n]+/g, "").trim();
+    remainingText = output.replace(/MEDIA:(?:\/|https?:\/\/)[^\s\n]+/g, "").trim();
 
-    // Send images first (copy to shared dir for Docker access)
+    // Send images first (copy/download to shared dir for Docker access)
     for (const imgPath of mediaPaths) {
       try {
-        // Copy from host cache to shared directory accessible by NapCat Docker
-        const dockerPath = copyImageToSharedDir(imgPath);
-        log(`copied image: ${imgPath} -> ${dockerPath}`);
+        let dockerPath;
+        if (imgPath.startsWith("http://") || imgPath.startsWith("https://")) {
+          // Download remote image
+          dockerPath = await downloadImageToSharedDir(imgPath);
+          log(`downloaded image: ${imgPath} -> ${dockerPath}`);
+        } else {
+          // Copy local image
+          dockerPath = copyImageToSharedDir(imgPath);
+          log(`copied image: ${imgPath} -> ${dockerPath}`);
+        }
         await sendReplyImage(run.route, dockerPath);
       } catch (err) {
         log(`failed to send image ${imgPath}: ${err.message}`);
