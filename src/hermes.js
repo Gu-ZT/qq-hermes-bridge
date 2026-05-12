@@ -146,11 +146,30 @@ export class HermesClient {
    * Approve or deny a pending command.
    */
   async approveRun(runId, action) {
-    const resp = await fetch(`${this.baseUrl}/v1/runs/${runId}/approve`, {
-      method: "POST",
-      headers: this._headers(),
-      body: JSON.stringify({ action }),
-    });
-    return resp.ok;
+    log(`approveRun: runId=${runId}, action=${action}`);
+    log(`approveRun: URL=${this.baseUrl}/v1/runs/${runId}/approval`);
+
+    try {
+      const resp = await fetch(`${this.baseUrl}/v1/runs/${runId}/approval`, {
+        method: "POST",
+        headers: this._headers(),
+        body: JSON.stringify({ choice: action }),
+      });
+
+      log(`approveRun: response status=${resp.status}`);
+
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        log(`approveRun: error response body=${text.slice(0, 200)}`);
+        throw new Error(`approveRun failed ${resp.status}: ${text.slice(0, 200)}`);
+      }
+
+      const data = await resp.json().catch(() => ({}));
+      log(`approveRun: success, response=${JSON.stringify(data)}`);
+      return true;
+    } catch (err) {
+      log(`approveRun error: ${err.message}`);
+      throw err;
+    }
   }
 }

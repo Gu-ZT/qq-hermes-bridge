@@ -173,10 +173,20 @@ async function sendMessage(route, message, replyMsgId) {
 }
 
 async function sendSegments(route, segments) {
-  if (route.type === "group") {
-    await onebot.sendGroupMsg(route.groupId, segments);
-  } else {
-    await onebot.sendPrivateMsg(route.userId, segments);
+  log(`sendSegments: type=${route.type}, groupId=${route.groupId}, userId=${route.userId}, segments=${segments.length}`);
+  try {
+    if (route.type === "group") {
+      const result = await onebot.sendGroupMsg(route.groupId, segments);
+      log(`sendSegments: group message sent successfully`);
+      return result;
+    } else {
+      const result = await onebot.sendPrivateMsg(route.userId, segments);
+      log(`sendSegments: private message sent successfully`);
+      return result;
+    }
+  } catch (err) {
+    log(`sendSegments error: ${err.message}`);
+    throw err;
   }
 }
 
@@ -454,10 +464,18 @@ async function handleStopCommand(route) {
 // ── Approval Handling ──
 
 function handleApprovalRequest(runId, ev) {
-  if (!config.approvalEnabled) return;
+  if (!config.approvalEnabled) {
+    log(`approval disabled, skipping`);
+    return;
+  }
 
   const run = activeRuns.get(runId);
-  if (!run) return;
+  if (!run) {
+    log(`approval: no active run found for ${runId}`);
+    return;
+  }
+
+  log(`approval: storing pending for run ${runId}, route: ${JSON.stringify(run.route)}`);
 
   const approval = {
     route: run.route,
@@ -469,9 +487,17 @@ function handleApprovalRequest(runId, ev) {
   // Auto-deny after timeout
   approval.timeoutTimer = setTimeout(async () => {
     if (pendingApprovals.has(runId)) {
+      log(`approval timeout for run ${runId}, auto-denying`);
       pendingApprovals.delete(runId);
-      await hermes.approveRun(runId, "deny");
-      await sendMessage(run.route, "⏰ 审批超时，已自动拒绝");
+      try {
+        const result = await hermes.approveRun(runId, "deny");
+        log(`approval timeout deny result: ${result}`);
+      } catch (err) {
+        log(`approval timeout deny error: ${err.message}`);
+      }
+      await sendMessage(run.route, "⏰ 审批超时，已自动拒绝").catch((err) =>
+        log(`approval timeout message error: ${err.message}`)
+      );
     }
   }, config.approvalTimeoutSec * 1000);
 
@@ -486,18 +512,27 @@ function handleApprovalRequest(runId, ev) {
     `回复 "始终允许" — 本次会话内始终允许`,
   ].filter(Boolean);
 
-  sendMessage(run.route, lines.join("\n")).catch((err) =>
-    log(`approval send error: ${err.message}`)
-  );
+  const approvalMsg = lines.join("\n");
+  log(`approval: sending request to ${run.route.type}:${run.route.groupId || run.route.userId}`);
+  log(`approval: message content: ${approvalMsg.slice(0, 100)}...`);
+
+  sendMessage(run.route, approvalMsg)
+    .then(() => log(`approval: message sent successfully`))
+    .catch((err) => log(`approval send error: ${err.message}`));
 }
 
 async function handleApprovalReply(route, text, msgId) {
+  log(`approval reply check: text="${text}", pendingApprovals=${pendingApprovals.size}`);
+
   for (const [runId, approval] of pendingApprovals) {
     const approvalRoute = approval.route;
+    log(`approval reply: checking run ${runId}, route: ${JSON.stringify(approvalRoute)}`);
+
     if (
       (route.type === "group" && approvalRoute.type === "group" && route.groupId === approvalRoute.groupId) ||
       (route.type === "user" && approvalRoute.type === "user" && route.userId === approvalRoute.userId)
     ) {
+      log(`approval reply: route matched for run ${runId}`);
       const lower = text.toLowerCase();
       let action;
 
@@ -508,12 +543,20 @@ async function handleApprovalReply(route, text, msgId) {
       } else if (lower === "始终允许" || lower === "always" || lower === "session") {
         action = "session";
       } else {
+        log(`approval reply: text "${lower}" doesn't match any keyword, returning false`);
         return false;
       }
 
+      log(`approval reply: matched action=${action} for run ${runId}`);
       clearTimeout(approval.timeoutTimer);
       pendingApprovals.delete(runId);
-      await hermes.approveRun(runId, action);
+
+      try {
+        const result = await hermes.approveRun(runId, action);
+        log(`approval reply: approveRun result=${result}`);
+      } catch (err) {
+        log(`approval reply: approveRun error: ${err.message}`);
+      }
 
       const statusText = {
         once: "已批准（一次）✅",
@@ -521,10 +564,13 @@ async function handleApprovalReply(route, text, msgId) {
         session: "已允许本次会话 ✅",
       }[action];
 
-      await sendMessage(route, statusText, msgId);
+      await sendMessage(route, statusText, msgId).catch((err) =>
+        log(`approval reply: send status error: ${err.message}`)
+      );
       return true;
     }
   }
+  log(`approval reply: no matching pending approval found`);
   return false;
 }
 
@@ -532,6 +578,7 @@ async function handleApprovalReply(route, text, msgId) {
 
 export async function start() {
   log("starting bridge...");
+  log(`Approval: enabled=${config.approvalEnabled}, timeout=${config.approvalTimeoutSec}s`);
   onebot.connect();
 
   onebot.on("message.group", handleMessage);
