@@ -321,7 +321,8 @@ export class CardRenderer {
       回复以下内容进行审批：<br>
       <span class="cmd">批准</span> 或 <span class="cmd">通过</span> — 允许一次<br>
       <span class="cmd">拒绝</span> 或 <span class="cmd">deny</span> — 拒绝执行<br>
-      <span class="cmd">始终允许</span> — 本次会话内始终允许
+      <span class="cmd">本次允许</span> 或 <span class="cmd">session</span> — 本次会话内允许<br>
+      <span class="cmd">始终允许</span> 或 <span class="cmd">always</span> — 永久允许该命令
     </div>
     <div class="footer">run: ${CardRenderer.escapeHtml(runId?.slice(-8))}</div>
   </div>

@@ -868,7 +868,7 @@ class QQBridge {
       await this.sendReplyImage(route, imagePath);
       await this.sendReply(
         route,
-        `⚠️ 上方命令需要审批。回复 "批准" / "拒绝" / "始终允许" 来处理。`
+        `⚠️ 上方命令需要审批。回复 "批准" / "拒绝" / "本次允许" / "始终允许" 来处理。`
       );
     } else {
       const lines = [
@@ -878,7 +878,7 @@ class QQBridge {
         data.preview ? `说明: ${data.preview.slice(0, 200)}` : "",
         riskLevel === "high" ? `风险: 🔴 高` : riskLevel === "medium" ? `风险: 🟡 中` : `风险: 🔵 低`,
         "",
-        `回复 "批准" / "拒绝" / "始终允许" 来处理`,
+        `回复 "批准" / "拒绝" / "本次允许" / "始终允许" 来处理`,
         `(run: ${runId.slice(-8)})`,
       ].filter(Boolean);
       await this.sendReply(route, lines.join("\n"));
