@@ -2,3 +2,5 @@ node_modules/
 .env
 *.log
 .idea/
+ref/
+package-lock.json

@@ -43,6 +43,9 @@ class QQBridge {
   /** 待审批记录：runId → Approval */
   private readonly pendingApprovals = new Map<string, Approval>();
 
+  /** 已发送审批消息跟踪：runId → true（防止重复发送） */
+  private readonly approvalMessageSent = new Map<string, boolean>();
+
   /** 群成员昵称缓存：groupId:userId → 群名片或昵称 */
   private readonly memberCache = new Map<string, string>();
 
@@ -713,6 +716,8 @@ class QQBridge {
     const run = this.activeRuns.get(runId);
     if (!run) return;
     this.activeRuns.delete(runId);
+    this.pendingApprovals.delete(runId);
+    this.approvalMessageSent.delete(runId);
 
     let output = run.finalOutput || run.messageDelta;
 
@@ -792,6 +797,18 @@ class QQBridge {
     const run = this.activeRuns.get(runId);
     if (!run) return;
 
+    // 防止同一 run 重复发送审批消息
+    if (this.approvalMessageSent.has(runId)) {
+      // 仍更新待审批数据（工具可能被多次调用）
+      this.pendingApprovals.set(runId, {
+        runId,
+        route: run.route,
+        data: ev,
+        createdAt: Date.now(),
+      });
+      return;
+    }
+
     const route = run.route;
     const command = ev.command || "未知命令";
     const patternKey = ev.pattern_key || "";
@@ -809,11 +826,13 @@ class QQBridge {
       createdAt: Date.now(),
     };
     this.pendingApprovals.set(runId, approval);
+    this.approvalMessageSent.set(runId, true);
 
     if (config.approvalTimeoutSec > 0) {
       approval.timeoutTimer = setTimeout(async () => {
         if (this.pendingApprovals.has(runId)) {
           this.pendingApprovals.delete(runId);
+          this.approvalMessageSent.delete(runId);
           try {
             await this.hermes.resolveApproval(runId, "deny");
             await this.sendReply(route, `⏱️ 审批超时，已自动拒绝: ${command.slice(0, 100)}`);
@@ -897,6 +916,7 @@ class QQBridge {
 
         if (approval.timeoutTimer) clearTimeout(approval.timeoutTimer);
         this.pendingApprovals.delete(runId);
+        this.approvalMessageSent.delete(runId);
 
         try {
           await this.hermes.resolveApproval(runId, choice as "once" | "deny" | "always" | "session");

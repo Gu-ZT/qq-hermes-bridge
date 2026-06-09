@@ -89,6 +89,7 @@ export class HermesClient {
         const reader = resp.body!.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        let currentEvent = "";
 
         while (!aborted) {
           const { done, value } = await reader.read();
@@ -99,18 +100,33 @@ export class HermesClient {
           buffer = lines.pop() || "";
 
           for (const line of lines) {
+            // SSE event 行：记录当前事件类型
+            if (line.startsWith("event: ")) {
+              currentEvent = line.slice(7).trim();
+              continue;
+            }
             if (line.startsWith("data: ")) {
               const jsonStr = line.slice(6).trim();
               if (!jsonStr) continue;
               try {
-                const event = JSON.parse(jsonStr) as { event?: string } & Record<string, unknown>;
-                const eventType = event.event || "unknown";
-                const handler = (callbacks as Record<string, ((ev: unknown) => void) | undefined>)[eventType];
-                if (handler) {
-                  handler(event);
-                } else {
-                  callbacks._any?.(event as never);
+                const data = JSON.parse(jsonStr) as { event?: string } & Record<string, unknown>;
+                // 优先用 SSE event 行的类型，其次用 data.event
+                const eventType = currentEvent || (data.event as string) || (data as Record<string, unknown>).type as string || "unknown";
+
+                if (eventType) {
+                  const handler = (callbacks as Record<string, ((ev: unknown) => void) | undefined>)[eventType];
+                  if (handler) {
+                    handler(data);
+                  } else {
+                    callbacks._any?.(data as never);
+                  }
+                  // run.completed / run.failed 也触发 _end
+                  if (eventType === "run.completed" || eventType === "run.failed") {
+                    callbacks._end?.();
+                  }
                 }
+
+                currentEvent = ""; // 重置，等待下一个事件
               } catch {
                 // 非 JSON 的 SSE 数据（心跳注释）
               }
