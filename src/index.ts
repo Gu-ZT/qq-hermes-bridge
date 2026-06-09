@@ -5,9 +5,8 @@ import { CardRenderer } from "./renderer.js";
 import type { ProgressCardData, ApprovalCardData } from "./renderer.js";
 import { SkillManager } from "./skills.js";
 import { ChatHistoryStore } from "./history.js";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, copyFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { join } from "path";
-import { randomBytes } from "crypto";
 import type {
   RouteInfo,
   Session,
@@ -51,11 +50,6 @@ class QQBridge {
 
   /** 聊天记录持久化存储 */
   private readonly historyStore: ChatHistoryStore;
-
-  // ── 图片共享目录 ──
-
-  private static readonly HOST_IMAGE_DIR = "/home/qsrhf/napcat/config/hermes-images";
-  private static readonly DOCKER_IMAGE_DIR = "/app/napcat/config/hermes-images";
 
   // ── SOUL.md ──
 
@@ -287,13 +281,13 @@ class QQBridge {
     }
   }
 
-  /** 发送图片 */
-  private async sendReplyImage(route: RouteInfo, imagePath: string): Promise<void> {
+  /** 发送图片（base64 格式） */
+  private async sendReplyImage(route: RouteInfo, imageData: string): Promise<void> {
     try {
       if (route.type === "group") {
-        await this.onebot.sendGroupImage(route.groupId!, `file://${imagePath}`);
+        await this.onebot.sendGroupImage(route.groupId!, imageData);
       } else {
-        await this.onebot.sendPrivateImage(route.userId, `file://${imagePath}`);
+        await this.onebot.sendPrivateImage(route.userId, imageData);
       }
     } catch (err) {
       this.log(`图片发送失败: ${(err as Error).message}，回退到文字`);
@@ -317,33 +311,21 @@ class QQBridge {
   }
 
   // ===================================================================
-  //  图片共享
+  //  图片处理
   // ===================================================================
 
-  /** 复制本地图片到共享目录 */
-  private copyImageToShared(hostImagePath: string): string {
-    mkdirSync(QQBridge.HOST_IMAGE_DIR, { recursive: true });
-    const ext = hostImagePath.split(".").pop()?.split("?")[0] || "png";
-    const name = `img_${Date.now()}_${randomBytes(4).toString("hex")}.${ext}`;
-    const hostPath = join(QQBridge.HOST_IMAGE_DIR, name);
-    const dockerPath = join(QQBridge.DOCKER_IMAGE_DIR, name);
-    copyFileSync(hostImagePath, hostPath);
-    return dockerPath;
+  /** 将本地图片文件编码为 base64 */
+  private localImageToBase64(filePath: string): string {
+    const buffer = readFileSync(filePath);
+    return `base64://${buffer.toString("base64")}`;
   }
 
-  /** 下载远程图片到共享目录 */
-  private async downloadImageToShared(imageUrl: string): Promise<string> {
-    mkdirSync(QQBridge.HOST_IMAGE_DIR, { recursive: true });
-    const ext = imageUrl.split(".").pop()?.split("?")[0] || "jpg";
-    const name = `img_${Date.now()}_${randomBytes(4).toString("hex")}.${ext}`;
-    const hostPath = join(QQBridge.HOST_IMAGE_DIR, name);
-    const dockerPath = join(QQBridge.DOCKER_IMAGE_DIR, name);
-
+  /** 下载远程图片并编码为 base64 */
+  private async downloadImageToBase64(imageUrl: string): Promise<string> {
     const resp = await fetch(imageUrl);
     if (!resp.ok) throw new Error(`下载失败: ${resp.status}`);
     const buffer = Buffer.from(await resp.arrayBuffer());
-    writeFileSync(hostPath, buffer);
-    return dockerPath;
+    return `base64://${buffer.toString("base64")}`;
   }
 
   // ===================================================================
@@ -749,13 +731,13 @@ class QQBridge {
 
       for (const imgPath of mediaPaths) {
         try {
-          let dockerPath: string;
+          let imageData: string;
           if (imgPath.startsWith("http://") || imgPath.startsWith("https://")) {
-            dockerPath = await this.downloadImageToShared(imgPath);
+            imageData = await this.downloadImageToBase64(imgPath);
           } else {
-            dockerPath = this.copyImageToShared(imgPath);
+            imageData = this.localImageToBase64(imgPath);
           }
-          await this.sendReplyImage(run.route, dockerPath);
+          await this.sendReplyImage(run.route, imageData);
         } catch (err) {
           this.log(`图片发送失败 ${imgPath}: ${(err as Error).message}`);
         }

@@ -1,7 +1,5 @@
 import { config } from "./config.js";
-import { existsSync, writeFileSync, mkdirSync, readdirSync, unlinkSync } from "fs";
-import { join } from "path";
-import { randomBytes } from "crypto";
+import { existsSync } from "fs";
 import type { Browser } from "puppeteer-core";
 
 const log = (msg: string, ...args: unknown[]) => console.log(`[renderer] ${msg}`, ...args);
@@ -39,11 +37,6 @@ export class CardRenderer {
     "/usr/bin/chromium",
     "/usr/bin/google-chrome",
   ];
-
-  /** 图片共享目录（宿主机路径 → Docker 路径） */
-  private static readonly HOST_IMAGE_DIR = "/home/qsrhf/napcat/config/hermes-images";
-  private static readonly DOCKER_IMAGE_DIR = "/app/napcat/config/hermes-images";
-  private static readonly MAX_IMAGES = 50;
 
   /** 获取或启动共享的 Puppeteer 浏览器实例 */
   private static async getBrowser(): Promise<Browser | null> {
@@ -329,47 +322,32 @@ export class CardRenderer {
 </body></html>`;
   }
 
-  /** 将 PNG Buffer 保存到共享目录，返回 Docker 容器内可访问的路径 */
-  static saveImage(pngBuffer: Buffer): string {
-    mkdirSync(CardRenderer.HOST_IMAGE_DIR, { recursive: true });
-    // 自动清理旧图片，最多保留 50 张
-    try {
-      const files = readdirSync(CardRenderer.HOST_IMAGE_DIR).filter((f) => f.endsWith(".png"));
-      if (files.length >= CardRenderer.MAX_IMAGES) {
-        files.sort();
-        for (const f of files.slice(0, files.length - CardRenderer.MAX_IMAGES + 1)) {
-          try { unlinkSync(join(CardRenderer.HOST_IMAGE_DIR, f)); } catch { /* 忽略 */ }
-        }
-      }
-    } catch { /* 忽略 */ }
-    const name = `progress_${Date.now()}_${randomBytes(4).toString("hex")}.png`;
-    const hostPath = join(CardRenderer.HOST_IMAGE_DIR, name);
-    const dockerPath = join(CardRenderer.DOCKER_IMAGE_DIR, name);
-    writeFileSync(hostPath, pngBuffer);
-    return dockerPath;
+  /** 将 PNG Buffer 编码为 OneBot base64 格式 */
+  private static imageToBase64(pngBuffer: Buffer): string {
+    return `base64://${pngBuffer.toString("base64")}`;
   }
 
-  /** 渲染进度卡片为 PNG 图片，返回 Docker 路径 */
+  /** 渲染进度卡片为 base64 图片，返回 OneBot 可用的 base64:// 字符串 */
   static async renderProgressImage(data: ProgressCardData): Promise<string | null> {
     if (!config.progressAsImage) return null;
     try {
       const html = CardRenderer.renderProgressHtml(data);
       const buf = await CardRenderer.htmlToImage(html);
       if (!buf) return null;
-      return CardRenderer.saveImage(buf);
+      return CardRenderer.imageToBase64(buf);
     } catch (err) {
       log(`进度图片渲染失败: ${(err as Error).message}`);
       return null;
     }
   }
 
-  /** 渲染审批卡片为 PNG 图片，返回 Docker 路径 */
+  /** 渲染审批卡片为 base64 图片，返回 OneBot 可用的 base64:// 字符串 */
   static async renderApprovalImage(data: ApprovalCardData): Promise<string | null> {
     try {
       const html = CardRenderer.renderApprovalHtml(data);
       const buf = await CardRenderer.htmlToImage(html);
       if (!buf) return null;
-      return CardRenderer.saveImage(buf);
+      return CardRenderer.imageToBase64(buf);
     } catch (err) {
       log(`审批图片渲染失败: ${(err as Error).message}`);
       return null;
