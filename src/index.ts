@@ -568,8 +568,8 @@ class QQBridge {
     const sessionVersion = session.sessionVersion || 0;
     // Hermes sessionId 按人区分；群聊日志仍按群共享
     const hermesSessionBase = route.type === "group"
-      ? `group:${route.groupId}:user:${route.userId}`
-      : `user:${route.userId}`;
+      ? `group_${route.groupId}_user_${route.userId}`
+      : `user_${route.userId}`;
     const hermesSessionId = sessionVersion > 0 ? `${hermesSessionBase}:v${sessionVersion}` : hermesSessionBase;
 
     const historyContent = route.type === "group" ? `${senderLabel}: ${text}` : text;
@@ -703,11 +703,19 @@ class QQBridge {
 
     let output = run.finalOutput || run.messageDelta;
 
-    // 如果中间已经发过文本，只发送剩余未发部分
-    if (run.sentTextLength > 0 && output) {
-      const unsent = output.slice(run.sentTextLength).trim();
-      if (!unsent) return;
-      output = unsent;
+    // 如果中间已经发过文本，通过与 messageDelta 比对找出未发送的剩余部分
+    if (run.sentTextLength > 0 && run.messageDelta && output) {
+      // finalOutput 可能与 messageDelta 不同（trim/格式化差异），
+      // 因此用 messageDelta 当前总长度定位未发送内容更准确
+      const unsentFromDelta = run.messageDelta.slice(run.sentTextLength).trim();
+      if (unsentFromDelta) {
+        output = unsentFromDelta;
+      } else if (output.length > run.sentTextLength) {
+        // messageDelta 没新内容但 finalOutput 有，取 finalOutput 尾部
+        output = output.slice(run.sentTextLength).trim();
+      } else {
+        return; // 全部已发送
+      }
     }
 
     if (output?.trim()) {
