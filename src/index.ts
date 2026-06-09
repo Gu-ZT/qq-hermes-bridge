@@ -360,7 +360,7 @@ class QQBridge {
         const data: ProgressCardData = {
             tools: run.tools,
             currentTool: run.currentTool,
-            messageDelta: run.messageDelta,
+            messageDelta: run.pendingText || run.messageDelta,
             elapsed,
         };
 
