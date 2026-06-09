@@ -210,8 +210,9 @@ class QQBridge {
         return sess?.sessionVersion || 0;
     }
 
-    /** 追加历史消息（内存 + 持久化） */
+    /** 追加历史消息（内存 + 持久化），跳过空内容 */
     private appendHistory(key: string, role: string, content: string, userId?: string): void {
+        if (!content.trim()) return;
         const sess = this.getSession(key);
         sess.history.push({role, content, userId});
         const max = config.localHistoryMaxMessages * 2;
@@ -560,7 +561,7 @@ class QQBridge {
         const senderLabel = `${senderName} (${route.userId})`;
         const userPrompt =
             route.type === "group"
-                ? `【当前消息 - 请回复这条】${senderLabel}: ${text}`
+                ? `${senderLabel}: ${text}`
                 : text;
 
         const sessionKey = this.getSessionKey(route);
@@ -705,17 +706,22 @@ class QQBridge {
 
         // 如果中间已经发过文本，通过与 messageDelta 比对找出未发送的剩余部分
         if (run.sentTextLength > 0 && run.messageDelta && output) {
-            // finalOutput 可能与 messageDelta 不同（trim/格式化差异），
-            // 因此用 messageDelta 当前总长度定位未发送内容更准确
             const unsentFromDelta = run.messageDelta.slice(run.sentTextLength).trim();
             if (unsentFromDelta) {
                 output = unsentFromDelta;
             } else if (output.length > run.sentTextLength) {
-                // messageDelta 没新内容但 finalOutput 有，取 finalOutput 尾部
                 output = output.slice(run.sentTextLength).trim();
             } else {
                 return; // 全部已发送
             }
+        }
+
+        // 运行没有任何输出（SSE 连接失败 / 模型错误等），通知用户并记录空回复占位
+        if (!output?.trim()) {
+            const errorMsg = "❌ 执行失败：未收到 Hermes 响应，请稍后重试";
+            this.appendHistory(this.getSessionKey(run.route), "assistant", errorMsg);
+            await this.sendReplyWithMention(run.route, errorMsg, run.userMsgId).catch(() => {});
+            return;
         }
 
         if (output?.trim()) {
