@@ -4,6 +4,7 @@
   "type": "module",
   "description": "QQ ↔ Hermes Agent bridge via NapCat OneBot v11 + SSE streaming",
   "main": "src/index.ts",
+  "packageManager": "pnpm@11.5.0+",
   "scripts": {
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit"
